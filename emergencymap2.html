@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Smart Emergency Service Map</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.css" />
+
+  <style>
+    body, html { margin: 0; padding: 0; height: 100%; }
+    #map { height: 100%; width: 100%; }
+    #dashboard {
+      position: absolute;
+      top: 10px; left: 10px;
+      z-index: 1000;
+      background: white;
+      padding: 15px;
+      border-radius: 10px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.2);
+      width: 280px;
+    }
+    #dashboard input, #dashboard button, #dashboard select {
+      width: 100%;
+      box-sizing: border-box;
+      margin-bottom: 10px;
+      padding: 8px;
+      border-radius: 5px;
+      border: 1px solid #ccc;
+    }
+    #dashboard button {
+      font-weight: bold;
+      border: none;
+      cursor: pointer;
+    }
+    #sendAlertBtn {
+      background-color: red;
+      color: white;
+    }
+    #sendAlertBtn:disabled {
+      background-color: #999;
+      cursor: not-allowed;
+    }
+    #clearAlertBtn {
+      background-color: #444;
+      color: white;
+    }
+    #hospital-list div {
+      padding: 5px;
+      margin-bottom: 5px;
+      background: #f1f1f1;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    #hospital-list div:hover {
+      background: #ddd;
+    }
+    #status {
+        background: #f1f1f1; padding: 10px; border-radius: 5px;
+        text-align: center; font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+
+<div id="dashboard">
+  <h3>🆘 Emergency Map</h3>
+  <div id="status">Listening for alerts...</div>
+  <hr>
+  <label>🚨 Select Service</label>
+  <select id="serviceType">
+    <option value="ambulance">🚑 Ambulance</option>
+    <option value="fire">🚒 Fire Force</option>
+    <option value="police">🚓 Police</option>
+  </select>
+
+  <input type="text" id="searchInput" placeholder="Manually route to hospital..." />
+  <button onclick="searchPlace()">Manual Route</button>
+
+  <div id="hospital-list">
+    <h4>🏥 Quick Hospitals</h4>
+    <div onclick="quickSelectHospital('Community Health Centre, Kottakkal')">Community Health Centre</div>
+    <div onclick="quickSelectHospital('HMS Hospital Kottakkal')">HMS Hospital</div>
+    <div onclick="quickSelectHospital('Almas Hospital Kottakkal')">Almas Hospital</div>
+  </div>
+
+  <div id="alert-controls">
+    <h4>📣 Alert Controls</h4>
+    <p style="font-size:12px; margin:0 0 5px 0;">Sends route to nearby users.</p>
+    <button id="sendAlertBtn" onclick="broadcastRouteToUsers()" disabled>Send Alert</button>
+    <button id="clearAlertBtn" onclick="clearSystem()">Clear System</button>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.js"></script>
+<script>
+  const map = L.map('map').setView([11.0030, 76.0015], 14); // Kottakkal
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors'
+  }).addTo(map);
+
+  const baseLocation = L.latLng(11.0030, 76.0015);
+  let routeControl = null;
+  let incidentMarker = null;
+  const sendAlertButton = document.getElementById('sendAlertBtn');
+
+  const icons = {
+    ambulance: "🚑",
+    fire: "🚒",
+    police: "🚓",
+    incident: "💥",
+    destination: "🏁"
+  };
+
+  document.getElementById("serviceType").addEventListener("change", updateUIBasedOnService);
+
+  // ** NEW: Listens for alerts from the User Map **
+  function listenForUserAlerts() {
+    const alertDataJSON = localStorage.getItem('emergencyAlert');
+    if (alertDataJSON) {
+      const alertData = JSON.parse(alertDataJSON);
+      localStorage.removeItem('emergencyAlert'); // Process only once
+
+      clearSystem(); // Clear previous state
+
+      document.getElementById('status').textContent = '🚨 NEW INCIDENT!';
+      document.getElementById('status').style.background = '#ffc107';
+
+      const incidentLatLng = L.latLng(alertData.lat, alertData.lng);
+      
+      // Place marker for the incident
+      incidentMarker = L.marker(incidentLatLng, {
+        icon: L.divIcon({ html: icons.incident, className: '', iconSize: [30, 30] })
+      }).addTo(map).bindPopup("<b>INCIDENT</b>").openPopup();
+
+      // Automatically create the route to the incident
+      createRoute(incidentLatLng);
+      map.fitBounds([baseLocation, incidentLatLng]);
+    }
+  }
+  
+  // ** NEW: Central function for creating routes **
+  function createRoute(destinationLatLng) {
+    if (routeControl) map.removeControl(routeControl);
+    
+    const service = document.getElementById("serviceType").value;
+    
+    routeControl = L.Routing.control({
+      waypoints: [ baseLocation, destinationLatLng ],
+      createMarker: function(i, waypoint, n) {
+        const iconHtml = (i === 0) ? icons[service] : icons.destination;
+        return L.marker(waypoint.latLng, {
+          icon: L.divIcon({ html: iconHtml, className: '', iconSize: [24, 24] })
+        });
+      },
+      routeWhileDragging: false
+    }).addTo(map);
+
+    // Wait for route to be calculated, then enable the send button
+    routeControl.on('routesfound', function(e) {
+        sendAlertButton.disabled = false;
+        document.getElementById('status').textContent = 'Route Found! Ready to Send.';
+    });
+  }
+
+  // ** NEW: Broadcasts the calculated path to users **
+  function broadcastRouteToUsers() {
+    if (!routeControl) return alert("No active route.");
+    
+    const routes = routeControl.getRouter()._routes;
+    if (!routes || routes.length === 0) {
+      return alert("Route data is not ready yet. Please wait.");
+    }
+    
+    const service = document.getElementById("serviceType").value;
+    const pathCoordinates = routes[0].coordinates.map(coord => [coord.lat, coord.lng]);
+    
+    const vehicleData = {
+      service: service,
+      path: pathCoordinates
+    };
+    
+    // Send the vehicle data and path to any listening user map
+    localStorage.setItem('activeVehicleAlert', JSON.stringify(vehicleData));
+    alert(`✅ Alert with vehicle path sent for ${service.toUpperCase()}.`);
+  }
+
+  // This function still handles manual routing
+  function searchPlace() {
+    const query = document.getElementById('searchInput').value;
+    if (!query) return alert("Enter a location name");
+
+    fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${query}, Kottakkal`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.length === 0) return alert("❌ Place not found");
+        
+        const destLatLng = L.latLng(parseFloat(data[0].lat), parseFloat(data[0].lon));
+        createRoute(destLatLng);
+      })
+      .catch(err => alert("Routing error"));
+  }
+
+  // This function now clears everything
+  function clearSystem() {
+    localStorage.removeItem('activeVehicleAlert');
+    sendAlertButton.disabled = true;
+
+    if (routeControl) {
+      map.removeControl(routeControl);
+      routeControl = null;
+    }
+    if (incidentMarker) {
+      map.removeLayer(incidentMarker);
+      incidentMarker = null;
+    }
+    document.getElementById('status').textContent = 'Listening for alerts...';
+    document.getElementById('status').style.background = '#f1f1f1';
+  }
+
+  function updateUIBasedOnService() {
+    const service = document.getElementById("serviceType").value;
+    document.getElementById("hospital-list").style.display =
+      (service === "ambulance") ? "block" : "none";
+    document.getElementById("alert-controls").style.display =
+      (service === "ambulance" || service === "fire") ? "block" : "none";
+  }
+
+  function quickSelectHospital(name) {
+    document.getElementById('searchInput').value = name;
+    searchPlace();
+  }
+  
+  // Start listening for alerts every 2 seconds
+  setInterval(listenForUserAlerts, 2000);
+  // Initial UI setup
+  updateUIBasedOnService();
+</script>
+
+</body>
+</html>
